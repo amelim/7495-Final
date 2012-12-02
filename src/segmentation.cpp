@@ -15,6 +15,7 @@
 #include <pcl/registration/icp_nl.h>
 #include <pcl/registration/transforms.h>
 #include <pcl/registration/ia_ransac.h>
+#include <pcl/registration/correspondence_rejection_features.h>
 
 #include <pcl/features/normal_3d.h>
 #include <pcl/features/pfh.h>
@@ -34,15 +35,16 @@ using pcl::visualization::PointCloudColorHandlerGenericField;
 using pcl::visualization::PointCloudColorHandlerCustom;
 
 //Typedefs
-typedef pcl::PointXYZ PointType;
+typedef pcl::PointXYZRGBA PointType;
 typedef pcl::PointCloud<PointType> PointCloud;
 typedef pcl::PointNormal PointNormalT;
 typedef pcl::PointCloud<PointNormalT> PointCloudWithNormals;
 
-boost::filesystem::path pcd_dir("/home/andrew/School/Kinect/data/work_2");
+boost::filesystem::path pcd_dir("/home/andrew/School/Kinect/data/work_3");
 
 pcl::visualization::PCLVisualizer *p;
-int vp_1, vp_2;
+pcl::visualization::PCLVisualizer *final;
+int vp_1, vp_2, vp_3;
 
 void showCloudsLeft(const PointCloud::Ptr cloud_target, const PointCloud::Ptr cloud_source)
 {
@@ -55,7 +57,7 @@ void showCloudsLeft(const PointCloud::Ptr cloud_target, const PointCloud::Ptr cl
   p->addPointCloud(cloud_target, tgt_h, "vp1_target", vp_1);
   p->addPointCloud(cloud_source, src_h, "vp1_source", vp_1);
   PCL_INFO("Press q to begin registration. \n");
-  p->spin();
+  p->spinOnce();
 }
 
 void showCloudsRightFeats(const PointCloud::Ptr cloud_target, const PointCloud::Ptr cloud_source)
@@ -174,7 +176,7 @@ void pairAlign(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt,
 
     prev = reg.getLastIncrementalTransformation();
 
-    showCloudsRight(points_with_normals_tgt, points_with_normals_src);
+    //showCloudsRight(points_with_normals_tgt, points_with_normals_src);
     std::cout << "Fitness: " << reg.getFitnessScore() << std::endl;
   }
 
@@ -190,7 +192,7 @@ void pairAlign(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt,
   p->addPointCloud (cloud_src, cloud_src_h, "source", vp_2);
 
   PCL_INFO ("Press q to continue the registration.\n");
-  p->spin ();
+  p->spinOnce ();
 
   *output += *cloud_src;
   final_transform = targetToSource;
@@ -207,7 +209,7 @@ void featureAlign(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_t
   pcl::VoxelGrid<PointType> grid;
   if(downsample)
   {
-    grid.setLeafSize(0.03, 0.03, 0.03);
+    grid.setLeafSize(0.05, 0.05, 0.05);
     grid.setInputCloud(cloud_src);
     grid.filter(*src);
 
@@ -243,7 +245,7 @@ void featureAlign(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_t
   pcl::PointCloud<pcl::PFHSignature125>::Ptr pfhs_src (new pcl::PointCloud<pcl::PFHSignature125> ());
   pcl::PointCloud<pcl::PFHSignature125>::Ptr pfhs_tgt (new pcl::PointCloud<pcl::PFHSignature125> ());
 
-  pfh.setRadiusSearch(0.5);
+  pfh.setRadiusSearch(0.05);
   pfh.setSearchMethod(tree);
 
   pfh.setInputCloud(src);
@@ -254,14 +256,17 @@ void featureAlign(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_t
   pfh.setInputNormals(points_with_normals_tgt);
   pfh.compute(*pfhs_tgt);
 
-  //Initial Alignment with SACIA
+  /*pcl::registration::CorrespondenceRejectorFeatures rej;
+  rej.setSourceFeature(pfhs_src);
+  rej.setTargetFeature(pfhs_tgt);*/
 
+  //Initial Alignment with SACIA
   pcl::PointCloud<PointType>::Ptr ia_cloud(new pcl::PointCloud<PointType>);
   pcl::SampleConsensusInitialAlignment<PointType, PointType, pcl::PFHSignature125> sac;
 
   sac.setMinSampleDistance(0.05f);
-  sac.setMaxCorrespondenceDistance(0.5);
-  sac.setMaximumIterations(500);
+  sac.setMaxCorrespondenceDistance(0.1);
+  sac.setMaximumIterations(600);
 
   sac.setInputCloud(src);
   sac.setSourceFeatures(pfhs_src);
@@ -271,26 +276,45 @@ void featureAlign(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_t
 
   sac.align(*ia_cloud);
   Eigen::Matrix4f ia_trans = sac.getFinalTransformation();
-  showCloudsRightFeats(ia_cloud, tgt);
+  //showCloudsRightFeats(ia_cloud, tgt);
 
   //Refinement
+  pcl::PointCloud<PointType>::Ptr refine_cloud(new pcl::PointCloud<PointType>);
   pcl::IterativeClosestPoint<PointType, PointType> icp;
-  icp.setMaxCorrespondenceDistance(0.5);
-  icp.setRANSACOutlierRejectionThreshold(0.1);
-  icp.setTransformationEpsilon(1e-6);
-  icp.setMaximumIterations(200);
+  icp.setMaxCorrespondenceDistance(0.05);
+  icp.setRANSACOutlierRejectionThreshold(0.2);
+  icp.setTransformationEpsilon(0.0000001);
+  icp.setMaximumIterations(1000);
 
   icp.setInputCloud(ia_cloud);
   icp.setInputTarget(tgt);
 
-  icp.align(*output);
+  icp.align(*refine_cloud);
 
-  final_transform = icp.getFinalTransformation() * ia_trans;
+  Eigen::Matrix4f Ti = Eigen::Matrix4f::Identity(), prev, targetToSource;
+  targetToSource = icp.getFinalTransformation() * ia_trans;
+  final_transform = targetToSource.inverse();
 
 
-  showCloudsRightFeats(output, tgt);
+  /*targetToSource = Ti.inverse();
+
+  pcl::transformPointCloud(*cloud_tgt, *output, targetToSource);
+  p->removePointCloud ("source");
+  p->removePointCloud ("target");
+
+  PointCloudColorHandlerCustom<PointType> cloud_tgt_h (output, 0, 255, 0);
+  PointCloudColorHandlerCustom<PointType> cloud_src_h (cloud_src, 255, 0, 0);
+  p->addPointCloud (output, cloud_tgt_h, "target", vp_2);
+  p->addPointCloud (cloud_src, cloud_src_h, "source", vp_2);
+
+*/
+  *output += *refine_cloud;
+
+  PointCloud::Ptr temp(new PointCloud);
+  pcl::transformPointCloud(*cloud_src, *temp, final_transform );
+  //showCloudsRightFeats(refine_cloud, tgt);
   PCL_INFO ("Press q to continue the registration.\n");
-  p->spin ();
+  //p->spin();
 
 }
 
@@ -299,7 +323,8 @@ int main(int argc, char** argv)
   
   pcl::PointCloud<PointType>::Ptr src_cloud(new pcl::PointCloud<PointType>);
   pcl::PointCloud<PointType>::Ptr tgt_cloud(new pcl::PointCloud<PointType>);
-  PointCloud::Ptr result(new PointCloud);
+  pcl::PointCloud<PointType>::Ptr result(new PointCloud);
+  pcl::PointCloud<PointType>::Ptr raw(new PointCloud);
   Eigen::Matrix4f GlobalTransform = Eigen::Matrix4f::Identity(), pairTransform;
 
   //Sort of input values
@@ -310,11 +335,11 @@ int main(int argc, char** argv)
   sort(pcd_files.begin(), pcd_files.end());
 
   //Init PCLVisualizer
-  p = new pcl::visualization::PCLVisualizer(argc, argv, "Pairwise Incremental ICP");
+  /*p = new pcl::visualization::PCLVisualizer(argc, argv, "Pairwise Incremental ICP");
   p->createViewPort(0.0, 0, 0.5, 1.0, vp_1);
-  p->createViewPort(0.5, 0, 1.0, 1.0, vp_2);
+  p->createViewPort(0.5, 0, 1.0, 1.0, vp_2);*/
 
-  for(int j = 1; j < pcd_files.size(); ++j)
+  for(int j = 4; j < 8 /*pcd_files.size()*/; ++j)
   {
     boost::filesystem::path source = pcd_files[j-1];
     boost::filesystem::path target = pcd_files[j];
@@ -329,16 +354,36 @@ int main(int argc, char** argv)
     std::vector<int> indices;
     pcl::removeNaNFromPointCloud(*src_cloud, *src_cloud, indices);
 
-    showCloudsLeft(src_cloud, tgt_cloud);
+    //showCloudsLeft(src_cloud, tgt_cloud);
 
-    PointCloud::Ptr temp(new PointCloud);
+    pcl::PointCloud<PointType>::Ptr temp(new PointCloud);
     //pairAlign(src_cloud, tgt_cloud, temp, pairTransform, true);
     featureAlign(src_cloud, tgt_cloud, temp, pairTransform, true);
 
-    pcl::transformPointCloud(*temp, *result, GlobalTransform);
+    if(j == 1)
+      *result += *src_cloud;
+  
+    *raw += *tgt_cloud;
+    
     GlobalTransform = pairTransform * GlobalTransform;
+    pcl::transformPointCloud(*tgt_cloud, *tgt_cloud, GlobalTransform);
 
+    //featureAlign(temp, result, temp, pairTransform, true);
+    *result += *tgt_cloud;
+
+    //GlobalTransform = pairTransform * GlobalTransform;
+    //pcl::transformPointCloud(*tgt_cloud, *temp, GlobalTransform);
+  
   }
+  final = new pcl::visualization::PCLVisualizer(argc, argv, "Final");
+  final->createViewPort(0.0, 0.0, 1.0, 1.0, vp_3);
+    final->removePointCloud ("result");
+    pcl::visualization::PointCloudColorHandlerRGBField<PointType> cloud_result_h (result);
+    PointCloudColorHandlerCustom<PointType> raw_h(raw, 255, 0, 0);
+    final->addPointCloud (result, cloud_result_h, "result", vp_3);
+    final->addPointCloud (raw, raw_h, "raw", vp_3);
+    final->spin();
+
 
   return 0;
 }
