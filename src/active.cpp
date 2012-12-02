@@ -3,12 +3,13 @@
 #include <math.h>
 #include <Eigen/Dense>
 #include <pcl/point_cloud.h>
-#include <pcl/point_types.hpp>
+#include <pcl/point_types.h>
 #include <pcl/PointIndices.h>
-
+#include "segment.cpp"
 
 using namespace std;
 using Eigen::MatrixXd;
+using Eigen::VectorXd;
 
 
 class Learner {
@@ -16,7 +17,7 @@ class Learner {
     int m;  // Number of features for each superpixel
     int k;  // Number of classes (labels)
     int l;  // Number of labeled superpixels so far
-    pcl::PointCloud<pcl::PointXYZRGB> cloud;
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud;
     vector<pcl::PointIndices> superpixels;
     MatrixXd x;      // The n x m feature matrix
     MatrixXd sigma;  // The m x m feature lengthscale matrix
@@ -29,10 +30,10 @@ class Learner {
     void compute_features(void);
     
     public:
-    void Learner(int, int, pcl::PointCloud<pcl::PointXYZRGB>&,
-                      vector<pcl::PointIndices>&);
+    Learner(int, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr,
+                      vector<pcl::PointIndices>);
     void compute_weight_matrices(void);
-    int update_label(int, MatrixXd&);
+    int update_label(int, MatrixXd);
     void compute_harmonic_solution(void);
     int most_uncertain_superpixel(void);
     int least_uncertain_superpixel(void);
@@ -40,9 +41,9 @@ class Learner {
 };
 
 
-void Learner::Learner(int classes,
-                      pcl::PointCloud<pcl::PointXYZRGB>& point_cloud,
-                      vector<pcl::PointIndices>& clusters) {
+Learner::Learner(int classes,
+                 pcl::PointCloud<pcl::PointXYZRGBA>::Ptr point_cloud,
+                 vector<pcl::PointIndices> clusters) {
     n = clusters.size();
     m = 6;
     k = classes;
@@ -50,19 +51,27 @@ void Learner::Learner(int classes,
     cloud = point_cloud;
     superpixels = clusters;
     
-    MatrixXd x(n, m);
+    x = MatrixXd(n, m);
     compute_features();
     
-    MatrixXd sigma(m, m);
+    sigma = MatrixXd(m, m);
     sigma << MatrixXd::Identity(m, m);
     
-    MatrixXd W(n, n);
-    MatrixXd D(n, n);
-    MatrixXd L(n, n);
+    W = MatrixXd(n, n);
+    D = MatrixXd(n, n);
+    L = MatrixXd(n, n);
     compute_weight_matrices();
     
-    MatrixXd f(n, k);
+    f = MatrixXd(n, k);
     f << MatrixXd::Zero(n, k);
+    
+//    cout << "x:" << endl << x << endl;
+//    cout << "W:" << endl << W << endl;
+//    cout << "D:" << endl << D << endl;
+//    cout << "L:" << endl << L << endl;
+//    cout << "sigma:" << endl << sigma << endl;
+//    cout << "f:" << endl << f << endl;
+    
 }
 
 
@@ -70,29 +79,35 @@ void Learner::compute_features() {
     // For each superpixel, populate its feature vector with spatial, color,
     // and texture information.
     pcl::PointIndices cluster;
-    pcl::PointXYZRGB point;
+    pcl::PointXYZRGBA point;
     int cluster_size, x_sum, y_sum, z_sum;
     int r_sum, g_sum, b_sum;
-    for (i = 0; i < n; i++) {
-        cluster = superpixel[i];
-        cluster_size = cluster.size();
+    for (int i = 0; i < n; i++) {
+        cluster = superpixels[i];
+        cluster_size = cluster.indices.size();
         x_sum = y_sum = z_sum = 0;
         r_sum = g_sum = b_sum = 0;
-        for (j = 0; j < cluster_size; j++) {
-            point = cluster[j];
+        for (int j = 0; j < cluster_size; j++) {
+            point = cloud->points[cluster.indices[j]];
             x_sum += point.x;
             y_sum += point.y;
             z_sum += point.z;
-            r_sum += point.r;
-            g_sum += point.g;
-            b_sum += point.b;
+            
+            // TODO: Fix the color thingy
+            int rgb = point.rgb;
+            uint8_t r = (rgb >> 16) & 0x0000ff;
+            uint8_t g = (rgb >> 8)  & 0x0000ff;
+            uint8_t b = (rgb)       & 0x0000ff;
+            r_sum += r;
+            g_sum += g;
+            b_sum += b;
         }
-        x(i, 0) = (double) x_sum / cluster_size;
-        x(i, 1) = (double) y_sum / cluster_size;
-        x(i, 2) = (double) z_sum / cluster_size;
-        x(i, 3) = (double) r_sum / cluster_size;
-        x(i, 4) = (double) g_sum / cluster_size;
-        x(i, 5) = (double) b_sum / cluster_size;
+        x(i, 0) = ((double) x_sum) / cluster_size;
+        x(i, 1) = ((double) y_sum) / cluster_size;
+        x(i, 2) = ((double) z_sum) / cluster_size;
+        x(i, 3) = ((double) r_sum) / cluster_size;
+        x(i, 4) = ((double) g_sum) / cluster_size;
+        x(i, 5) = ((double) b_sum) / cluster_size;
     }
 }
 
@@ -100,18 +115,17 @@ void Learner::compute_features() {
 void Learner::compute_weight_matrices() {
     // Build weight matrix W of similarities between each superpixel pair.
     // Similarity is given by exp(-g^T * sigma * g) where g = x_i - x_j.
-    MatrixXd g(m, 1);
+    VectorXd g(m);
     double weight;
-    for (i = 0; i < n; i++) {
-        for (j = 0; j <= i; j++) {
-            g.col(1) = x.row(i) - x.row(j);
-            weight = exp(-g.transpose() * sigma * g);
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j <= i; j++) {
+            g = x.row(i) - x.row(j);
+            weight = exp((-g.transpose() * sigma * g).value());
             W(i, j) = weight;
             if (i != j)
                 W(j, i) = weight;
         }
     }
-    
     // Compute the diagonal matrix D of row sums of W
     D = W.rowwise().sum().asDiagonal();
     
@@ -120,7 +134,7 @@ void Learner::compute_weight_matrices() {
 }
 
 
-int Learner::update_label(int index, MatrixXd& label) {
+int Learner::update_label(int index, MatrixXd label) {
     // Return error code -1 if the given index has already been set
     if (index < l)
         return -1;
@@ -145,13 +159,13 @@ int Learner::update_label(int index, MatrixXd& label) {
 void Learner::compute_harmonic_solution() {
     int u = n - l;
     MatrixXd f_u(u, k);
-    f_u = L.bottomRightCorner(u, u).inverse() * W.bottomLeftCorner(u, l) * f.head(l);
+    f_u = L.bottomRightCorner(u, u).inverse() * W.bottomLeftCorner(u, l) * f.topRows(l);
 }
 
  
 int Learner::least_uncertain_superpixel() {
     // Find the k minimum entropy rows (maximun of sum of log(p))
-    MatrixXf::Index index;
+    MatrixXd::Index index;
     f_u.array().log().rowwise().sum().maxCoeff(&index);
     return (int) index;
 }
@@ -159,7 +173,7 @@ int Learner::least_uncertain_superpixel() {
 
 int Learner::most_uncertain_superpixel() {
     // Find the maximum entropy row (minimum of sum of log(p))
-    MatrixXf::Index index;
+    MatrixXd::Index index;
     f_u.array().log().rowwise().sum().minCoeff(&index);
     return (int) index;
 }
@@ -171,10 +185,41 @@ void Learner::learn_weights() {
     // y is (l^2 x 1) and has 0 if f_i = f_j and infinity if f_i != f_j.
     // Solution is diag(sigma) = (X^T * X)^-1 *X^T * y.
     
+    int num_constraints = (l * (l - 1)) / 2;
+    MatrixXd X(m, num_constraints);
+    VectorXd y(num_constraints);
+    
+    int index = 0;
+    for (int i = 0; i < l; i++) {
+        for (int j = 0; j < i; j++) {
+            VectorXd g = x.row(i) - x.row(j);
+            X.col(index) = g.array() * g.array();
+            if ((f.row(i).array() == f.row(j).array()).all())
+                y(index) = 0;
+            else
+                y(index) = 100;
+            index++;
+        }
+    }
+    
+    sigma.diagonal() = (X.transpose() * X).inverse() * X.transpose() * y;
 }
 
 
+int main (int argc, char** argv) {
+       
+//    test_segmentation();
+    
+    // Read in point cloud and downsample
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud = read_pcd();
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr small_cloud (new pcl::PointCloud<pcl::PointXYZRGBA>);
+    downsample(cloud, small_cloud);
+    
+    // Extract Euclidean clusters
+    std::vector<pcl::PointIndices> clusters = euclidean_clusters(small_cloud);
 
+    Learner learner(4, small_cloud, clusters);
+}
 
 
 
