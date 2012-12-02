@@ -23,6 +23,9 @@ pcl::PointCloud<pcl::PointXYZRGBA>::Ptr read_pcd() {
   
   reader.read("data/work_2/kinect_5.pcd", *cloud);
   
+  std::vector<int> indices; 
+  pcl::removeNaNFromPointCloud(*cloud, *cloud, indices); 
+  
   return cloud;
 }
 

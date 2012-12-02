@@ -10,6 +10,10 @@
 using namespace std;
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
+using Eigen::Array3d;
+
+
+const double ZERO = 0.00000000001;
 
 
 class Learner {
@@ -23,7 +27,8 @@ class Learner {
     MatrixXd sigma;  // The m x m feature lengthscale matrix
     MatrixXd W;      // The n x n weight matrix
     MatrixXd D;      // The n x n diagonal matrix of rowwise sums of W
-    MatrixXd L;      // The n x n combinatorial Laplacian matrix, D - W
+//    MatrixXd L;      // The n x n combinatorial Laplacian matrix, D - W
+    MatrixXd P;
     MatrixXd f;      // The n x k matrix of known labels
     MatrixXd f_u;    // The u x k matrix of soft labels for unlabeled data
     
@@ -33,7 +38,7 @@ class Learner {
     Learner(int, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr,
                       vector<pcl::PointIndices>);
     void compute_weight_matrices(void);
-    int update_label(int, MatrixXd);
+    int update_label(int, VectorXd);
     void compute_harmonic_solution(void);
     int most_uncertain_superpixel(void);
     int least_uncertain_superpixel(void);
@@ -59,7 +64,8 @@ Learner::Learner(int classes,
     
     W = MatrixXd(n, n);
     D = MatrixXd(n, n);
-    L = MatrixXd(n, n);
+//    L = MatrixXd(n, n);
+    P = MatrixXd(n, n);
     compute_weight_matrices();
     
     f = MatrixXd(n, k);
@@ -76,38 +82,38 @@ Learner::Learner(int classes,
 
 
 void Learner::compute_features() {
-    // For each superpixel, populate its feature vector with spatial, color,
-    // and texture information.
     pcl::PointIndices cluster;
     pcl::PointXYZRGBA point;
-    int cluster_size, x_sum, y_sum, z_sum;
-    int r_sum, g_sum, b_sum;
+    int cluster_size;
+    double x_sum, y_sum, z_sum;
+    Array3d color_sum;
+    
+    // Compute spatial and color features for each superpixel
     for (int i = 0; i < n; i++) {
         cluster = superpixels[i];
         cluster_size = cluster.indices.size();
         x_sum = y_sum = z_sum = 0;
-        r_sum = g_sum = b_sum = 0;
+        color_sum << 0, 0, 0;
+        
+        // For each point in the superpixel
         for (int j = 0; j < cluster_size; j++) {
+            
+            // Get the spatial coordinates
             point = cloud->points[cluster.indices[j]];
             x_sum += point.x;
             y_sum += point.y;
             z_sum += point.z;
             
-            // TODO: Fix the color thingy
-            int rgb = point.rgb;
-            uint8_t r = (rgb >> 16) & 0x0000ff;
-            uint8_t g = (rgb >> 8)  & 0x0000ff;
-            uint8_t b = (rgb)       & 0x0000ff;
-            r_sum += r;
-            g_sum += g;
-            b_sum += b;
+            // Get the color
+            color_sum += point.getRGBVector3i().cast<double>().array() / 255.0;
         }
-        x(i, 0) = ((double) x_sum) / cluster_size;
-        x(i, 1) = ((double) y_sum) / cluster_size;
-        x(i, 2) = ((double) z_sum) / cluster_size;
-        x(i, 3) = ((double) r_sum) / cluster_size;
-        x(i, 4) = ((double) g_sum) / cluster_size;
-        x(i, 5) = ((double) b_sum) / cluster_size;
+        
+        // Compute the average location and color for this superpixel
+        double size = (double) cluster_size;
+        x(i, 0) = x_sum / size;
+        x(i, 1) = y_sum / size;
+        x(i, 2) = z_sum / size;
+        x.block(i, 3, 1, 3) = (color_sum / size).matrix().transpose();
     }
 }
 
@@ -130,25 +136,29 @@ void Learner::compute_weight_matrices() {
     D = W.rowwise().sum().asDiagonal();
     
     // Compute the combinatorial Laplacian L = D - W
-    L = D - W;
+//    L = D - W;  
+    P = D.inverse() * W;
 }
 
 
-int Learner::update_label(int index, MatrixXd label) {
+int Learner::update_label(int index, VectorXd label) {
     // Return error code -1 if the given index has already been set
     if (index < l)
         return -1;
     
     // Update the label vector f with the new label
-    f.row(l) = label;
+    f.row(l) = label.transpose();
     
     // Swap rows so that labeled data remains in the upper left
     W.row(index).swap(W.row(l));
-    L.row(index).swap(L.row(l));
+//    L.row(index).swap(L.row(l));
     x.row(index).swap(x.row(l));
     pcl::PointIndices temp1 = superpixels[index];
     superpixels[index] = superpixels[l];
     superpixels[l] = temp1;
+    
+//    cout << "x:" << endl << x << endl;
+//    cout << "f:" << endl << f << endl;
     
     // Increment the number of labeled superpixels and return 0 for success
     l++;
@@ -158,42 +168,53 @@ int Learner::update_label(int index, MatrixXd label) {
 
 void Learner::compute_harmonic_solution() {
     int u = n - l;
-    MatrixXd f_u(u, k);
-    f_u = L.bottomRightCorner(u, u).inverse() * W.bottomLeftCorner(u, l) * f.topRows(l);
+    f_u = MatrixXd(u, k);
+//    f_u = L.bottomRightCorner(u, u).inverse() * W.bottomLeftCorner(u, l) * f.topRows(l);
+    f_u = (MatrixXd::Identity(u, u) - P.bottomRightCorner(u, u)).inverse() * P.bottomLeftCorner(u, l) * f.topRows(l);
+    
+    cout << "f_u:" << endl << f_u << endl << endl;
 }
 
  
 int Learner::least_uncertain_superpixel() {
-    // Find the k minimum entropy rows (maximun of sum of log(p))
+    // Find the minimum entropy row (maximun of sum of p*log(p))
+    // Returns the index into superpixels, not into f_u
     MatrixXd::Index index;
-    f_u.array().log().rowwise().sum().maxCoeff(&index);
-    return (int) index;
+    (f_u.array() * (ZERO + f_u.array()).log()).rowwise().sum().maxCoeff(&index);
+    
+    cout << "Certain: " << f_u.row(index) << endl;
+    
+    return (int) index + l;
 }
 
 
 int Learner::most_uncertain_superpixel() {
-    // Find the maximum entropy row (minimum of sum of log(p))
+    // Find the maximum entropy row (minimum of sum of p*log(p))
+    // Returns the index into superpixels, not into f_u
     MatrixXd::Index index;
-    f_u.array().log().rowwise().sum().minCoeff(&index);
-    return (int) index;
+    (f_u.array() * (ZERO + f_u.array()).log()).rowwise().sum().minCoeff(&index);
+    
+    cout << "Unertain: " << f_u.row(index) << endl;
+    
+    return (int) index + l;
 }
 
 
 void Learner::learn_weights() {
     // Set up X^T * diag(sigma) = y, where
-    // X is (m x l^2) and has [g_ij(1)^2, ..., g_ij(m)^2]^T in each column, and
+    // X is (l^2 x m) and has [g_ij(1)^2, ..., g_ij(m)^2] in each row, and
     // y is (l^2 x 1) and has 0 if f_i = f_j and infinity if f_i != f_j.
     // Solution is diag(sigma) = (X^T * X)^-1 *X^T * y.
     
     int num_constraints = (l * (l - 1)) / 2;
-    MatrixXd X(m, num_constraints);
+    MatrixXd X(num_constraints, m);
     VectorXd y(num_constraints);
     
     int index = 0;
     for (int i = 0; i < l; i++) {
         for (int j = 0; j < i; j++) {
             VectorXd g = x.row(i) - x.row(j);
-            X.col(index) = g.array() * g.array();
+            X.row(index) = g.array() * g.array();
             if ((f.row(i).array() == f.row(j).array()).all())
                 y(index) = 0;
             else
@@ -201,8 +222,8 @@ void Learner::learn_weights() {
             index++;
         }
     }
-    
     sigma.diagonal() = (X.transpose() * X).inverse() * X.transpose() * y;
+//    cout << "sigma:" << endl << sigma << endl;
 }
 
 
@@ -217,8 +238,34 @@ int main (int argc, char** argv) {
     
     // Extract Euclidean clusters
     std::vector<pcl::PointIndices> clusters = euclidean_clusters(small_cloud);
-
-    Learner learner(4, small_cloud, clusters);
+    
+    // Create the active learning object
+    int num_classes = 4;
+    Learner learner(num_classes, small_cloud, clusters);
+    
+    // Update the labels of four of the superpixels
+    VectorXd label(num_classes);
+    label << 1.0, 0.0, 0.0, 0.0;
+    learner.update_label(20, label);
+    label << 0.0, 1.0, 0.0, 0.0;
+    learner.update_label(10, label);
+    label << 0.0, 1.0, 0.0, 0.0;
+    learner.update_label(15, label);
+    label << 0.0, 0.0, 0.0, 1.0;
+    learner.update_label(5, label);
+    
+    // Learn the feature weights and recompute weight matrices
+//    learner.learn_weights();
+//    learner.compute_weight_matrices();
+    
+    // Propagate labels to unlabeled superpixels
+    learner.compute_harmonic_solution();
+    
+    // Self-train
+    int certain = learner.least_uncertain_superpixel();
+    
+    // Choose next superpixel for human labeling
+    int uncertain = learner.most_uncertain_superpixel();
 }
 
 
