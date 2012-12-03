@@ -43,6 +43,7 @@ class Learner {
     int most_uncertain_superpixel(void);
     int least_uncertain_superpixel(void);
     void learn_weights(void);
+    void self_train(int);
 };
 
 
@@ -147,9 +148,11 @@ int Learner::update_label(int index, VectorXd label) {
         return -1;
     
     // Update the label vector f with the new label
-    f.row(l) = label.transpose();
+    f.row(index) = label.transpose();
+//    f.row(l) = label.transpose();
     
     // Swap rows so that labeled data remains in the upper left
+    f.row(index).swap(f.row(l));
     W.row(index).swap(W.row(l));
 //    L.row(index).swap(L.row(l));
     x.row(index).swap(x.row(l));
@@ -172,29 +175,30 @@ void Learner::compute_harmonic_solution() {
 //    f_u = L.bottomRightCorner(u, u).inverse() * W.bottomLeftCorner(u, l) * f.topRows(l);
     f_u = (MatrixXd::Identity(u, u) - P.bottomRightCorner(u, u)).inverse() * P.bottomLeftCorner(u, l) * f.topRows(l);
     
-    cout << "f_u:" << endl << f_u << endl << endl;
+    f.bottomRows(u) = f_u;
+    cout << "f:" << endl << f << endl << endl;
 }
 
  
 int Learner::least_uncertain_superpixel() {
-    // Find the minimum entropy row (maximun of sum of p*log(p))
+    // Find the minimum entropy row (min of sum of -p*log(p))
     // Returns the index into superpixels, not into f_u
     MatrixXd::Index index;
-    (f_u.array() * (ZERO + f_u.array()).log()).rowwise().sum().maxCoeff(&index);
+    (-f_u.array() * (ZERO + f_u.array()).log()).rowwise().sum().minCoeff(&index);
     
-    cout << "Certain: " << f_u.row(index) << endl;
+//    cout << "Certain: " << f_u.row(index) << endl;
     
     return (int) index + l;
 }
 
 
 int Learner::most_uncertain_superpixel() {
-    // Find the maximum entropy row (minimum of sum of p*log(p))
+    // Find the maximum entropy row (max of sum of -p*log(p))
     // Returns the index into superpixels, not into f_u
     MatrixXd::Index index;
-    (f_u.array() * (ZERO + f_u.array()).log()).rowwise().sum().minCoeff(&index);
+    (-f_u.array() * (ZERO + f_u.array()).log()).rowwise().sum().maxCoeff(&index);
     
-    cout << "Unertain: " << f_u.row(index) << endl;
+//    cout << "Unertain: " << f_u.row(index) << endl;
     
     return (int) index + l;
 }
@@ -224,6 +228,27 @@ void Learner::learn_weights() {
     }
     sigma.diagonal() = (X.transpose() * X).inverse() * X.transpose() * y;
 //    cout << "sigma:" << endl << sigma << endl;
+}
+
+
+void Learner::self_train(int max_iters) {
+    int really_max_iters = n - l;
+    for (int added = 0; added < max_iters && added < really_max_iters; added++) {
+        
+        int i = least_uncertain_superpixel();
+        if ((-f_u.row(i-l).array() * (ZERO + f_u.row(i-l).array()).log()).sum() > 0.6)
+            break;
+        
+        MatrixXd::Index max_index;
+        f_u.row(i-l).maxCoeff(&max_index);
+        
+        VectorXd label(k);
+        label = VectorXd::Zero(k);
+        label(max_index) = 1.0;
+        
+        update_label(i, label);
+        compute_harmonic_solution();
+    }
 }
 
 
@@ -262,10 +287,10 @@ int main (int argc, char** argv) {
     learner.compute_harmonic_solution();
     
     // Self-train
-    int certain = learner.least_uncertain_superpixel();
+    learner.self_train(10);
     
     // Choose next superpixel for human labeling
-    int uncertain = learner.most_uncertain_superpixel();
+//    int uncertain = learner.most_uncertain_superpixel();
 }
 
 

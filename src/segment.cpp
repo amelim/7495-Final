@@ -21,7 +21,7 @@ pcl::PointCloud<pcl::PointXYZRGBA>::Ptr read_pcd() {
   pcl::PCDReader reader;
   pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZRGBA>), cloud_f (new pcl::PointCloud<pcl::PointXYZRGBA>);
   
-  reader.read("data/work_2/kinect_5.pcd", *cloud);
+  reader.read("data/global.pcd", *cloud);
   
   std::vector<int> indices; 
   pcl::removeNaNFromPointCloud(*cloud, *cloud, indices); 
@@ -32,7 +32,7 @@ pcl::PointCloud<pcl::PointXYZRGBA>::Ptr read_pcd() {
 
 void downsample(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr input_cloud, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr output_cloud) {
   // Create the filtering object and downsample the dataset
-  float leaf_size = 0.01f;  // use a leaf size of 1cm
+  float leaf_size = 0.01f;  // 0.01 is 1 cm
   pcl::VoxelGrid<pcl::PointXYZRGBA> vg;
   vg.setInputCloud(input_cloud);
   vg.setLeafSize(leaf_size, leaf_size, leaf_size);
@@ -48,9 +48,9 @@ std::vector<pcl::PointIndices> euclidean_clusters(pcl::PointCloud<pcl::PointXYZR
 
   std::vector<pcl::PointIndices> clusters;
   pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
-  ec.setClusterTolerance(0.01); // 2cm
-  ec.setMinClusterSize(50);
-  ec.setMaxClusterSize(25000);
+  ec.setClusterTolerance(0.02); // 0.01 is 1cm
+  ec.setMinClusterSize(25);
+  ec.setMaxClusterSize(1000000);
   ec.setSearchMethod(tree);
   ec.setInputCloud(cloud);
   ec.extract(clusters);
