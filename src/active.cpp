@@ -1,6 +1,8 @@
 #include <iostream>
 #include <vector>
 #include <math.h>
+#include <stdlib.h>
+#include <time.h>
 #include <Eigen/Dense>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -58,9 +60,11 @@ class Learner {
     void compute_harmonic_solution(void);
     vector<int> most_uncertain_superpixels(int);
     vector<int> least_uncertain_superpixels(int);
+    vector<int> random_superpixels(int);
     void learn_weights(void);
-    void self_train(int);
-    void interactive_learn(int, int);
+    void self_train(int, double);
+    int interactive_learn(int, int, bool, bool, bool);
+    MatrixXd get_labels();
 };
 
 
@@ -210,8 +214,8 @@ vector<int> Learner::most_uncertain_superpixels(int count) {
     vector<int> indices;
     MatrixXd::Index index;
     
-    if (count > f_u.rows())
-        count = f_u.rows();
+    if (count > n - l)
+        count = n - l;
     if (count == 0)
         return indices;
     
@@ -234,6 +238,30 @@ vector<int> Learner::most_uncertain_superpixels(int count) {
     return indices;
 }
 
+
+vector<int> Learner::random_superpixels(int count) {
+    // Returns the indices of random unlabeled superpixels
+    
+    vector<int> indices;
+    
+    if (count > n - l)
+        count = n - l;
+    if (count == 0)
+        return indices;
+    
+    vector<int> all_indices;
+    for (int i = l; i < n; i++)
+        all_indices.push_back(i);
+    
+    srand(time(NULL));
+    while (indices.size() < count) {
+        int random = rand() % all_indices.size();
+        indices.push_back(all_indices[random]);
+        all_indices.erase(all_indices.begin() + random);
+    }
+    
+    return indices;
+}
 
 
 
@@ -264,14 +292,14 @@ void Learner::learn_weights() {
 }
 
 
-void Learner::self_train(int max_iters) {
+void Learner::self_train(int max_iters, double threshold) {
     if (max_iters > n - l)
         max_iters = n - l;
     
     for (int added = 0; added < max_iters; added++) {
         
         int i = least_uncertain_superpixels(1)[0];
-        if (entropies(i - l) > 0.6)
+        if (entropies(i - l) > threshold)
             break;
         
         MatrixXd::Index max_index;
@@ -287,10 +315,12 @@ void Learner::self_train(int max_iters) {
 }
 
 
-void Learner::interactive_learn(int max_iters, int labels_per_iter) {
-    // Find the 10 most uncertain superpixels. Project their constituent pixels
-    // onto each image, and pick the image with the most hits.
-    
+int Learner::interactive_learn(int max_iters,
+                                int labels_per_iter,
+                                bool use_self_training,
+                                bool use_active,
+                                bool use_weight_learning) {
+
     // Set up camera parameters and perspective projection matrix
     float width = 640.0;
     float height = 480.0;
@@ -306,31 +336,32 @@ void Learner::interactive_learn(int max_iters, int labels_per_iter) {
     
     // Initialize things
     Mat image((int) height, (int) width, CV_8UC3, Scalar(0, 0, 0));
+    namedWindow("Label this image", CV_WINDOW_AUTOSIZE);
+    
     pcl::PointXYZRGBA point;
     Vector4f P;
     Vector3f p;
     Vector3i rgb;
-    namedWindow("Label this image", CV_WINDOW_AUTOSIZE);
+    vector<int> indices;
     
     // Sort the point cloud by distance to camera so projection works correctly
     vector<pcl::PointXYZRGBA, Eigen::aligned_allocator<pcl::PointXYZRGBA> > sorted = cloud->points;
     sort(sorted.begin(), sorted.end(), lowest_z_last);
     
     // Main loop
+    int user_labels = 0;
     for (int iter = 0; iter < max_iters; iter++) {
         
-        // Compute stuff from the known labels
-//        learn_weights();
-//        compute_weight_matrices();
-        compute_harmonic_solution();
-        
         // Find the next superpixels to label
-        vector<int> indices = most_uncertain_superpixels(labels_per_iter);
+        if (use_active) {
+            compute_harmonic_solution();
+            indices = most_uncertain_superpixels(labels_per_iter);
+        }
+        else {
+            indices = random_superpixels(labels_per_iter);
+        }
         if (indices.size() == 0)
-            return;
-    
-        vector<pcl::PointXYZRGBA, Eigen::aligned_allocator<pcl::PointXYZRGBA> > sorted = cloud->points;
-        sort(sorted.begin(), sorted.end(), lowest_z_last);
+            return user_labels;
     
         // For each superpixel to be labeled
         for (int sp = 0; sp < indices.size(); sp++) {
@@ -347,7 +378,7 @@ void Learner::interactive_learn(int max_iters, int labels_per_iter) {
                 if (row >= 0 && row < height && col >= 0 and col < width) {
                     rgb = point.getRGBVector3i();
                     for (int j = 0; j < 3; j++)
-                        image.at<Vec3u>(row, col)[j] = (unsigned char) (rgb(2 - j) / 5);
+                        image.at<Vec3u>(row, col)[j] = (unsigned char) (rgb(2 - j) / 8);
                 }
             }
             
@@ -373,115 +404,92 @@ void Learner::interactive_learn(int max_iters, int labels_per_iter) {
                 c = waitKey(0);
             
             if (c == 'q')
-                return;
+                return user_labels;
             
             // Assume the key press was a label
             VectorXd label(k);
             label << VectorXd::Zero(k);
             label(c - '0') = 1.0;
             update_label(indices[sp], label);
+            user_labels++;
+        }
+        
+        // Before going on to the next iteration
+        if (use_weight_learning) {
+            learn_weights();
+            compute_weight_matrices();
+        }
+        if (use_self_training) {
+            compute_harmonic_solution();
+            self_train(5, 0.5);
         }
     }
     
+    return user_labels;
 }
-//    // Iterate over all points in the cloud
-//    for (int i = 0; i < sorted->points.size(); i++) {
-//        point = sorted->points[i];
-//        P << point.x, point.y, point.z, 1.0;
-//        p = (projection * P).array() / P(2);
-//        rgb = point.getRGBVector3i();
-//        int row = (int) p(1);
-//        int col = (int) p(0);
-//        if (row >= 0 && row < height && col >= 0 and col < width) {
-//            for (int j = 0; j < 3; j++)
-//                image.at<Vec3u>(row, col)[j] = (unsigned char) (rgb(2 - j) / 5);
-//        }
-//    }
-//    
-//    // Iterate over the points in the uncertain superpixels
-//    for (int i = 0; i < indices.size(); i++) {
-//        pcl::PointIndices cluster = superpixels[indices[i]];
-//        for (int j = 0; j < cluster.indices.size(); j++) {
-//            point = cloud->points[cluster.indices[j]];
-//            P << point.x, point.y, point.z, 1.0;
-//            p = (projection * P).array() / P(2);
-//            rgb = point.getRGBVector3i();
-//            int row = (int) p(1);
-//            int col = (int) p(0);
-//            if (row >= 0 && row < height && col >= 0 and col < width) {
-//                for (int j = 0; j < 3; j++)
-//                    image.at<Vec3u>(row, col)[j] = (unsigned char) rgb(2 - j);
-//            }
-////            image.at<Vec3u>(row, col)[0] = (unsigned char) 0;
-////            image.at<Vec3u>(row, col)[1] = (unsigned char) 0;
-////            image.at<Vec3u>(row, col)[2] = (unsigned char) 255;
-//        }
-//    }
-//    
-////    imwrite("image2.png", image);
+
+MatrixXd Learner::get_labels() {
+    MatrixXd new_f(n, k);
+    new_f = f;
+    return new_f;
+}
+
+
+void evaluate_algorithms() {
     
-//    namedWindow("Label this image", CV_WINDOW_AUTOSIZE);
-////    setMouseCallback("Label this image", onMouse, 0);
-//    
-//    
-//    for (;;) {
-//        imshow("Label this image", image);
-//        
-//        char c = waitKey(0);
-//        
-//        if (c == 'q')
-//            break;
-//    }
-
-
-//static void onMouse(int event, int x, int y, int, void*) {
-//    if(event != CV_EVENT_LBUTTONDOWN)
-//        return;
-//    
-//    
-//}
-
+    int num_classes = 10;
+    
+    // Read the point cloud
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud = read_pcd();
+    
+    // Segment the point cloud
+    std::vector<pcl::PointIndices> clusters = euclidean_clusters(cloud);
+//    std::vector<pcl::PointIndices> clusters = region_growing_segmentation(cloud);
+    
+    // Create the learners
+    Learner learner1(num_classes, cloud, clusters);
+    Learner learner2(num_classes, cloud, clusters);
+    Learner learner3(num_classes, cloud, clusters);
+    
+    // Random learner
+    int user_labels1 = learner1.interactive_learn(1000, 1, false, false, false);
+    MatrixXd ground_truth = learner1.get_labels();
+    double accuracy1 = 1.0;
+    
+    // Self-training only
+    int user_labels2 = learner2.interactive_learn(1000, 1, true, false, false);
+    MatrixXd labels2 = learner2.get_labels();
+    double accuracy2 = (labels2.array() * ground_truth.array()).sum() / labels2.rows();
+    
+    // Self-training + active
+    int user_labels3 = learner3.interactive_learn(1000, 1, true, true, false);
+    MatrixXd labels3 = learner3.get_labels();
+    double accuracy3 = (labels3.array() * ground_truth.array()).sum() / labels3.rows();
+    
+    cout << endl;
+    
+    cout << "Random" << endl
+         << "User labels: " << user_labels1 << endl
+         << "Accuracy:    " << accuracy1 << endl
+         << endl;
+    
+    cout << "Self-training only" << endl
+         << "User labels: " << user_labels2 << endl
+         << "Accuracy:    " << accuracy2 << endl
+         << endl;
+    
+    cout << "Self-training + active" << endl
+         << "User labels: " << user_labels3 << endl
+         << "Accuracy:    " << accuracy3 << endl
+         << endl;
+         
+}
 
 
 int main (int argc, char** argv) {
        
-//    test_segmentation();
+    evaluate_algorithms();
     
-    // Read in point cloud and downsample
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud = read_pcd();
-//    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr small_cloud (new pcl::PointCloud<pcl::PointXYZRGBA>);
-//    downsample(cloud, small_cloud);
-    
-    // Extract Euclidean clusters
-    std::vector<pcl::PointIndices> clusters = euclidean_clusters(cloud);
-    
-    // Create the active learning object
-    int num_classes = 10;
-    Learner learner(num_classes, cloud, clusters);
-    
-    // Update the labels of four of the superpixels
-//    VectorXd label(num_classes);
-//    label << 1.0, 0.0, 0.0, 0.0;
-//    learner.update_label(20, label);
-//    label << 0.0, 1.0, 0.0, 0.0;
-//    learner.update_label(10, label);
-//    label << 0.0, 1.0, 0.0, 0.0;
-//    learner.update_label(15, label);
-//    label << 0.0, 0.0, 0.0, 1.0;
-//    learner.update_label(5, label);
-    
-    // Learn the feature weights and recompute weight matrices
-//    learner.learn_weights();
-//    learner.compute_weight_matrices();
-    
-    // Propagate labels to unlabeled superpixels
-//    learner.compute_harmonic_solution();
-    
-    // Self-train
-//    learner.self_train(10);
-    
-    // Choose next superpixel for human labeling
-    learner.interactive_learn(30, 1);
 }
 
 
