@@ -5,15 +5,30 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/PointIndices.h>
+#include <pcl/common/transforms.h>
+#include <cv.h>
+#include <highgui.h>
 #include "segment.cpp"
 
 using namespace std;
+using namespace cv;
+using Eigen::Matrix;
 using Eigen::MatrixXd;
+using Eigen::Matrix4f;
+using Eigen::Vector4f;
+using Eigen::Vector3f;
+using Eigen::Vector3i;
 using Eigen::VectorXd;
 using Eigen::Array3d;
 
+typedef Vec<unsigned char, 3> Vec3u;
+
 
 const double ZERO = 0.00000000001;
+
+bool lowest_z_last(pcl::PointXYZRGBA p1, pcl::PointXYZRGBA p2) {
+    return (p1.z > p2.z);
+}
 
 
 class Learner {
@@ -31,6 +46,7 @@ class Learner {
     MatrixXd P;
     MatrixXd f;      // The n x k matrix of known labels
     MatrixXd f_u;    // The u x k matrix of soft labels for unlabeled data
+    VectorXd entropies; // The u-dimensional vector of entropies based on f_u
     
     void compute_features(void);
     
@@ -40,10 +56,11 @@ class Learner {
     void compute_weight_matrices(void);
     int update_label(int, VectorXd);
     void compute_harmonic_solution(void);
-    int most_uncertain_superpixel(void);
-    int least_uncertain_superpixel(void);
+    vector<int> most_uncertain_superpixels(int);
+    vector<int> least_uncertain_superpixels(int);
     void learn_weights(void);
     void self_train(int);
+    void interactive_learn(int, int);
 };
 
 
@@ -136,8 +153,7 @@ void Learner::compute_weight_matrices() {
     // Compute the diagonal matrix D of row sums of W
     D = W.rowwise().sum().asDiagonal();
     
-    // Compute the combinatorial Laplacian L = D - W
-//    L = D - W;  
+    // Compute the matrix P used in computing
     P = D.inverse() * W;
 }
 
@@ -149,19 +165,14 @@ int Learner::update_label(int index, VectorXd label) {
     
     // Update the label vector f with the new label
     f.row(index) = label.transpose();
-//    f.row(l) = label.transpose();
     
     // Swap rows so that labeled data remains in the upper left
     f.row(index).swap(f.row(l));
     W.row(index).swap(W.row(l));
-//    L.row(index).swap(L.row(l));
     x.row(index).swap(x.row(l));
     pcl::PointIndices temp1 = superpixels[index];
     superpixels[index] = superpixels[l];
     superpixels[l] = temp1;
-    
-//    cout << "x:" << endl << x << endl;
-//    cout << "f:" << endl << f << endl;
     
     // Increment the number of labeled superpixels and return 0 for success
     l++;
@@ -172,36 +183,58 @@ int Learner::update_label(int index, VectorXd label) {
 void Learner::compute_harmonic_solution() {
     int u = n - l;
     f_u = MatrixXd(u, k);
-//    f_u = L.bottomRightCorner(u, u).inverse() * W.bottomLeftCorner(u, l) * f.topRows(l);
     f_u = (MatrixXd::Identity(u, u) - P.bottomRightCorner(u, u)).inverse() * P.bottomLeftCorner(u, l) * f.topRows(l);
     
     f.bottomRows(u) = f_u;
     cout << "f:" << endl << f << endl << endl;
+    
+    entropies = VectorXd(u);
+    entropies = (-f_u.array() * (ZERO + f_u.array()).log()).rowwise().sum();
 }
 
  
-int Learner::least_uncertain_superpixel() {
-    // Find the minimum entropy row (min of sum of -p*log(p))
-    // Returns the index into superpixels, not into f_u
-    MatrixXd::Index index;
-    (-f_u.array() * (ZERO + f_u.array()).log()).rowwise().sum().minCoeff(&index);
+vector<int> Learner::least_uncertain_superpixels(int count) {
+    // Returns the indices of the superpixels with smallest entropy
     
-//    cout << "Certain: " << f_u.row(index) << endl;
+    entropies = -entropies;
+    vector<int> indices = most_uncertain_superpixels(count);
+    entropies = -entropies;
     
-    return (int) index + l;
+    return indices;
 }
 
 
-int Learner::most_uncertain_superpixel() {
-    // Find the maximum entropy row (max of sum of -p*log(p))
-    // Returns the index into superpixels, not into f_u
+vector<int> Learner::most_uncertain_superpixels(int count) {
+    // Returns the indices of the superpixels with largest entropy
+    
+    vector<int> indices;
     MatrixXd::Index index;
-    (-f_u.array() * (ZERO + f_u.array()).log()).rowwise().sum().maxCoeff(&index);
     
-//    cout << "Unertain: " << f_u.row(index) << endl;
+    if (count > f_u.rows())
+        count = f_u.rows();
+    if (count == 0)
+        return indices;
     
-    return (int) index + l;
+    double previous_max = entropies.maxCoeff(&index);
+    indices.push_back((int) index + l);
+    
+    while (indices.size() < count) {
+        double max_value = -1000.0;
+        int max_index = 0;
+        for (int i = 0; i < entropies.size(); i++) {
+            if (entropies(i) < previous_max && entropies(i) > max_value) {
+                max_index = i;
+                max_value = entropies(i);
+            }
+        }
+        indices.push_back(max_index + l);
+        previous_max = max_value;
+    }
+    
+    return indices;
 }
+
+
 
 
 void Learner::learn_weights() {
@@ -227,20 +260,22 @@ void Learner::learn_weights() {
         }
     }
     sigma.diagonal() = (X.transpose() * X).inverse() * X.transpose() * y;
-//    cout << "sigma:" << endl << sigma << endl;
+    cout << "sigma:" << endl << sigma << endl;
 }
 
 
 void Learner::self_train(int max_iters) {
-    int really_max_iters = n - l;
-    for (int added = 0; added < max_iters && added < really_max_iters; added++) {
+    if (max_iters > n - l)
+        max_iters = n - l;
+    
+    for (int added = 0; added < max_iters; added++) {
         
-        int i = least_uncertain_superpixel();
-        if ((-f_u.row(i-l).array() * (ZERO + f_u.row(i-l).array()).log()).sum() > 0.6)
+        int i = least_uncertain_superpixels(1)[0];
+        if (entropies(i - l) > 0.6)
             break;
         
         MatrixXd::Index max_index;
-        f_u.row(i-l).maxCoeff(&max_index);
+        f_u.row(i - l).maxCoeff(&max_index);
         
         VectorXd label(k);
         label = VectorXd::Zero(k);
@@ -252,52 +287,215 @@ void Learner::self_train(int max_iters) {
 }
 
 
+void Learner::interactive_learn(int max_iters, int labels_per_iter) {
+    // Find the 10 most uncertain superpixels. Project their constituent pixels
+    // onto each image, and pick the image with the most hits.
+    
+    // Set up camera parameters and perspective projection matrix
+    float width = 640.0;
+    float height = 480.0;
+    float alpha = 500.0;
+    float beta = 500.0;
+    float x_0 = width / 2.0;
+    float y_0 = height / 2.0;
+    
+    Matrix<float, 3, 4> projection;
+    projection << alpha, 0,    x_0,  0, 
+                  0,     beta, y_0,  0,
+                  0,     0,    1,    0;
+    
+    // Initialize things
+    Mat image((int) height, (int) width, CV_8UC3, Scalar(0, 0, 0));
+    pcl::PointXYZRGBA point;
+    Vector4f P;
+    Vector3f p;
+    Vector3i rgb;
+    namedWindow("Label this image", CV_WINDOW_AUTOSIZE);
+    
+    // Sort the point cloud by distance to camera so projection works correctly
+    vector<pcl::PointXYZRGBA, Eigen::aligned_allocator<pcl::PointXYZRGBA> > sorted = cloud->points;
+    sort(sorted.begin(), sorted.end(), lowest_z_last);
+    
+    // Main loop
+    for (int iter = 0; iter < max_iters; iter++) {
+        
+        // Compute stuff from the known labels
+//        learn_weights();
+//        compute_weight_matrices();
+        compute_harmonic_solution();
+        
+        // Find the next superpixels to label
+        vector<int> indices = most_uncertain_superpixels(labels_per_iter);
+        if (indices.size() == 0)
+            return;
+    
+        vector<pcl::PointXYZRGBA, Eigen::aligned_allocator<pcl::PointXYZRGBA> > sorted = cloud->points;
+        sort(sorted.begin(), sorted.end(), lowest_z_last);
+    
+        // For each superpixel to be labeled
+        for (int sp = 0; sp < indices.size(); sp++) {
+            pcl::PointIndices cluster = superpixels[indices[sp]];
+            cout << endl << indices[sp] << ": " << f.row(indices[sp]) << endl << endl;
+            
+            // Iterate over all points in the sorted cloud
+            for (int i = 0; i < sorted.size(); i++) {
+                point = sorted[i];
+                P << point.x, point.y, point.z, 1.0;
+                p = (projection * P).array() / P(2);
+                int row = (int) p(1);
+                int col = (int) p(0);
+                if (row >= 0 && row < height && col >= 0 and col < width) {
+                    rgb = point.getRGBVector3i();
+                    for (int j = 0; j < 3; j++)
+                        image.at<Vec3u>(row, col)[j] = (unsigned char) (rgb(2 - j) / 5);
+                }
+            }
+            
+            // Iterate over the points in the uncertain superpixels
+            for (int j = 0; j < cluster.indices.size(); j++) {
+                point = cloud->points[cluster.indices[j]];
+                P << point.x, point.y, point.z, 1.0;
+                p = (projection * P).array() / P(2);
+                int row = (int) p(1);
+                int col = (int) p(0);
+                if (row >= 0 && row < height && col >= 0 and col < width) {
+                    rgb = point.getRGBVector3i();
+                    for (int j = 0; j < 3; j++)
+                        image.at<Vec3u>(row, col)[j] = (unsigned char) rgb(2 - j);
+                }
+            }
+            
+            // Display the image and wait for a response
+            imshow("Label this image", image);
+            
+            char c = 'a';
+            while (c != 'q' && (c < '0' || c > '9'))
+                c = waitKey(0);
+            
+            if (c == 'q')
+                return;
+            
+            // Assume the key press was a label
+            VectorXd label(k);
+            label << VectorXd::Zero(k);
+            label(c - '0') = 1.0;
+            update_label(indices[sp], label);
+        }
+    }
+    
+}
+//    // Iterate over all points in the cloud
+//    for (int i = 0; i < sorted->points.size(); i++) {
+//        point = sorted->points[i];
+//        P << point.x, point.y, point.z, 1.0;
+//        p = (projection * P).array() / P(2);
+//        rgb = point.getRGBVector3i();
+//        int row = (int) p(1);
+//        int col = (int) p(0);
+//        if (row >= 0 && row < height && col >= 0 and col < width) {
+//            for (int j = 0; j < 3; j++)
+//                image.at<Vec3u>(row, col)[j] = (unsigned char) (rgb(2 - j) / 5);
+//        }
+//    }
+//    
+//    // Iterate over the points in the uncertain superpixels
+//    for (int i = 0; i < indices.size(); i++) {
+//        pcl::PointIndices cluster = superpixels[indices[i]];
+//        for (int j = 0; j < cluster.indices.size(); j++) {
+//            point = cloud->points[cluster.indices[j]];
+//            P << point.x, point.y, point.z, 1.0;
+//            p = (projection * P).array() / P(2);
+//            rgb = point.getRGBVector3i();
+//            int row = (int) p(1);
+//            int col = (int) p(0);
+//            if (row >= 0 && row < height && col >= 0 and col < width) {
+//                for (int j = 0; j < 3; j++)
+//                    image.at<Vec3u>(row, col)[j] = (unsigned char) rgb(2 - j);
+//            }
+////            image.at<Vec3u>(row, col)[0] = (unsigned char) 0;
+////            image.at<Vec3u>(row, col)[1] = (unsigned char) 0;
+////            image.at<Vec3u>(row, col)[2] = (unsigned char) 255;
+//        }
+//    }
+//    
+////    imwrite("image2.png", image);
+    
+//    namedWindow("Label this image", CV_WINDOW_AUTOSIZE);
+////    setMouseCallback("Label this image", onMouse, 0);
+//    
+//    
+//    for (;;) {
+//        imshow("Label this image", image);
+//        
+//        char c = waitKey(0);
+//        
+//        if (c == 'q')
+//            break;
+//    }
+
+
+//static void onMouse(int event, int x, int y, int, void*) {
+//    if(event != CV_EVENT_LBUTTONDOWN)
+//        return;
+//    
+//    
+//}
+
+
+
 int main (int argc, char** argv) {
        
 //    test_segmentation();
     
     // Read in point cloud and downsample
     pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud = read_pcd();
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr small_cloud (new pcl::PointCloud<pcl::PointXYZRGBA>);
-    downsample(cloud, small_cloud);
+//    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr small_cloud (new pcl::PointCloud<pcl::PointXYZRGBA>);
+//    downsample(cloud, small_cloud);
     
     // Extract Euclidean clusters
-    std::vector<pcl::PointIndices> clusters = euclidean_clusters(small_cloud);
+    std::vector<pcl::PointIndices> clusters = euclidean_clusters(cloud);
     
     // Create the active learning object
-    int num_classes = 4;
-    Learner learner(num_classes, small_cloud, clusters);
+    int num_classes = 10;
+    Learner learner(num_classes, cloud, clusters);
     
     // Update the labels of four of the superpixels
-    VectorXd label(num_classes);
-    label << 1.0, 0.0, 0.0, 0.0;
-    learner.update_label(20, label);
-    label << 0.0, 1.0, 0.0, 0.0;
-    learner.update_label(10, label);
-    label << 0.0, 1.0, 0.0, 0.0;
-    learner.update_label(15, label);
-    label << 0.0, 0.0, 0.0, 1.0;
-    learner.update_label(5, label);
+//    VectorXd label(num_classes);
+//    label << 1.0, 0.0, 0.0, 0.0;
+//    learner.update_label(20, label);
+//    label << 0.0, 1.0, 0.0, 0.0;
+//    learner.update_label(10, label);
+//    label << 0.0, 1.0, 0.0, 0.0;
+//    learner.update_label(15, label);
+//    label << 0.0, 0.0, 0.0, 1.0;
+//    learner.update_label(5, label);
     
     // Learn the feature weights and recompute weight matrices
 //    learner.learn_weights();
 //    learner.compute_weight_matrices();
     
     // Propagate labels to unlabeled superpixels
-    learner.compute_harmonic_solution();
+//    learner.compute_harmonic_solution();
     
     // Self-train
-    learner.self_train(10);
+//    learner.self_train(10);
     
     // Choose next superpixel for human labeling
-//    int uncertain = learner.most_uncertain_superpixel();
+    learner.interactive_learn(30, 1);
 }
 
 
 
 
 
-
+//    Matrix4f transform;
+//    transform <<   0.999854,   0.00993521,  0.0093811,    0.068779,
+//                  -0.00991821, 0.999913,   -0.000248864, -0.0604227,
+//                  -0.00940646, 0.000139605, 0.999935,     0.0793181,
+//                   0.0,        0.0,         0.0,          1.0;
+//    Matrix4f inv_transform = transform.inverse();
+//    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZRGBA>);
+//    pcl::transformPointCloud(*cloud, *transformed, inv_transform);
 
 
 

@@ -21,7 +21,7 @@ pcl::PointCloud<pcl::PointXYZRGBA>::Ptr read_pcd() {
   pcl::PCDReader reader;
   pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZRGBA>), cloud_f (new pcl::PointCloud<pcl::PointXYZRGBA>);
   
-  reader.read("data/global.pcd", *cloud);
+  reader.read("data/tripod_3/global.pcd", *cloud);
   
   std::vector<int> indices; 
   pcl::removeNaNFromPointCloud(*cloud, *cloud, indices); 
@@ -49,7 +49,7 @@ std::vector<pcl::PointIndices> euclidean_clusters(pcl::PointCloud<pcl::PointXYZR
   std::vector<pcl::PointIndices> clusters;
   pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
   ec.setClusterTolerance(0.02); // 0.01 is 1cm
-  ec.setMinClusterSize(25);
+  ec.setMinClusterSize(5000);
   ec.setMaxClusterSize(1000000);
   ec.setSearchMethod(tree);
   ec.setInputCloud(cloud);
@@ -110,7 +110,7 @@ void test_segmentation() {
   
   // Read in point cloud and downsample
   pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud = read_pcd();
-  pcl::PointCloud<pcl::PointXYZRGBA>::Ptr small_cloud (new pcl::PointCloud<pcl::PointXYZRGBA>);
+  pcl::PointCloud<pcl::PointXYZRGBA>::Ptr small_cloud(new pcl::PointCloud<pcl::PointXYZRGBA>);
   downsample(cloud, small_cloud);
   
   // Extract Euclidean clusters
