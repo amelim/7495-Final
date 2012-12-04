@@ -4,6 +4,7 @@ project(CV-3)
 
 
 find_package(PCL 1.7 REQUIRED)
+find_package(OpenCV REQUIRED)
 
 include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
@@ -14,3 +15,7 @@ target_link_libraries(icp ${PCL_LIBRARIES})
 
 add_executable(segment src/grow.cpp)
 target_link_libraries(segment ${PCL_LIBRARIES})
+
+add_executable (active src/active.cpp)
+target_link_libraries (active ${PCL_LIBRARIES})
+target_link_libraries (active ${OpenCV_LIBRARIES})
