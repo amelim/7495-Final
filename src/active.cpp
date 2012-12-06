@@ -429,7 +429,7 @@ int Learner::interactive_learn(int max_iters,
         }
         if (use_self_training && l > k) {
             compute_harmonic_solution();
-            self_train(20, 0.4);
+            self_train(2, 0.9);
         }
     }
     
