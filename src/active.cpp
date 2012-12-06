@@ -83,7 +83,7 @@ Learner::Learner(int classes,
     compute_features();
     
     sigma = MatrixXd(m, m);
-    sigma << MatrixXd::Identity(m, m);
+    sigma << 0.5 * MatrixXd::Identity(m, m);
     
     W = MatrixXd(n, n);
     D = MatrixXd(n, n);
