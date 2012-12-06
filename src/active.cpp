@@ -49,6 +49,7 @@ class Learner {
     MatrixXd f;      // The n x k matrix of known labels
     MatrixXd f_u;    // The u x k matrix of soft labels for unlabeled data
     VectorXd entropies; // The u-dimensional vector of entropies based on f_u
+    vector<int> sp_indices; // Keeps track of swapped indices
     
     void compute_features(void);
     
@@ -72,7 +73,7 @@ Learner::Learner(int classes,
                  pcl::PointCloud<pcl::PointXYZRGBA>::Ptr point_cloud,
                  vector<pcl::PointIndices> clusters) {
     n = clusters.size();
-    m = 6;
+    m = 3;
     k = classes;
     l = 0;
     cloud = point_cloud;
@@ -82,7 +83,7 @@ Learner::Learner(int classes,
     compute_features();
     
     sigma = MatrixXd(m, m);
-    sigma << MatrixXd::Identity(m, m);
+    sigma << 0.5 * MatrixXd::Identity(m, m);
     
     W = MatrixXd(n, n);
     D = MatrixXd(n, n);
@@ -92,6 +93,9 @@ Learner::Learner(int classes,
     
     f = MatrixXd(n, k);
     f << MatrixXd::Zero(n, k);
+    
+    for (int i = 0; i < n; i++)
+        sp_indices.push_back(i);
     
 //    cout << "x:" << endl << x << endl;
 //    cout << "W:" << endl << W << endl;
@@ -127,7 +131,7 @@ void Learner::compute_features() {
             z_sum += point.z;
             
             // Get the color
-            color_sum += point.getRGBVector3i().cast<double>().array() / 255.0;
+//            color_sum += point.getRGBVector3i().cast<double>().array() / 255.0;
         }
         
         // Compute the average location and color for this superpixel
@@ -135,7 +139,7 @@ void Learner::compute_features() {
         x(i, 0) = x_sum / size;
         x(i, 1) = y_sum / size;
         x(i, 2) = z_sum / size;
-        x.block(i, 3, 1, 3) = (color_sum / size).matrix().transpose();
+//        x.block(i, 3, 1, 3) = (color_sum / size).matrix().transpose();
     }
 }
 
@@ -177,6 +181,9 @@ int Learner::update_label(int index, VectorXd label) {
     pcl::PointIndices temp1 = superpixels[index];
     superpixels[index] = superpixels[l];
     superpixels[l] = temp1;
+    int temp2 = sp_indices[index];
+    sp_indices[index] = sp_indices[l];
+    sp_indices[l] = temp2;
     
     // Increment the number of labeled superpixels and return 0 for success
     l++;
@@ -398,6 +405,7 @@ int Learner::interactive_learn(int max_iters,
             
             // Display the image and wait for a response
             imshow("Label this image", image);
+//            imwrite("image.png", image);
             
             char c = 'a';
             while (c != 'q' && (c < '0' || c > '9'))
@@ -415,29 +423,32 @@ int Learner::interactive_learn(int max_iters,
         }
         
         // Before going on to the next iteration
-        if (use_weight_learning) {
+        if (use_weight_learning && (l*(l-1))/2 >= m) {
             learn_weights();
             compute_weight_matrices();
         }
-        if (use_self_training) {
+        if (use_self_training && l > k) {
             compute_harmonic_solution();
-            self_train(5, 0.5);
+            self_train(2, 0.9);
         }
     }
     
     return user_labels;
 }
 
+
 MatrixXd Learner::get_labels() {
+    // Get the label matrix in a canonical order
     MatrixXd new_f(n, k);
-    new_f = f;
+    for (int i = 0; i < n; i++)
+        new_f.row(sp_indices[i]) = f.row(i);
     return new_f;
 }
 
 
 void evaluate_algorithms() {
     
-    int num_classes = 10;
+    int num_classes = 4;
     
     // Read the point cloud
     pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud = read_pcd();
